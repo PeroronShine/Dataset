@@ -1,130 +1,141 @@
 import pandas as pd
 import numpy as np
-import torch
-import tensorflow as tf
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder
+from sklearn.model_selection import KFold, cross_val_score
+from sklearn.linear_model import LinearRegression
 
-class Dataset():
 
+class Dataset:
     def __init__(self, path_to_file: str):
         self.__data = pd.read_csv(path_to_file)
+        self.X = None  # Features
+        self.y = None  # Target variable
 
-    def set_data(self, path_to_file: str):
-        self.__data = pd.read_csv(path_to_file)
-
-    def get_data(self):
+    def get_data(self) -> pd.DataFrame:
+        """Returns the data."""
         return self.__data
 
-    def remove_outliers(self, column: str) -> pd.DataFrame:
-        """удаление выбросов(крайне больших чисел)
-        вычисляет значение, ниже которого находится 99% данных и хранит в переменной q
-        все строки, в которых значения в столбце превышают 99-й процентиль удаляются"""
-        q = self.__data[column].quantile(0.99)
+    def remove_outliers(self, column: str, threshold: float = 0.99) -> pd.DataFrame:
+        """Removes outliers in the specified column."""
+        if column not in self.__data.columns:
+            raise ValueError(f"Column '{column}' not found in data.")
+        q = self.__data[column].quantile(threshold)
         self.__data = self.__data[self.__data[column] <= q]
         return self.__data
 
-    def filled(self, strategy='mode', value=None):
-        """заполнение пропусков"""
-        """eсли в числовом столбце есть None(NaN), то заменяем его на то, что выбрал пользователь или удаляем
-        'median' - заменяет на медиану
-        'mode' - заменяет на самое частое
-        'medium' - на среднее значение
-        'const' - заменяем на заданную константу (меняет во всех столбцах и значение может не подойти)"""
+    def fill_missing(self, strategy: str = 'mode', value: float = None):
+        """Fills missing values in the data."""
+        strategies = ['mode', 'mean', 'median', 'constant']
+        if strategy not in strategies:
+            raise ValueError(f"Unsupported strategy. Choose from {strategies}.")
         for column in self.__data.columns:
             if self.__data[column].isnull().sum() > 0:
                 if strategy == 'mode':
                     mode_val = self.__data[column].mode()[0]
                     self.__data[column].fillna(mode_val, inplace=True)
                 elif strategy == 'mean':
-                    mean_val = self.__data[column].sum()/self.__data[column].count()
+                    mean_val = self.__data[column].mean()
                     self.__data[column].fillna(mean_val, inplace=True)
                 elif strategy == 'median':
                     median_val = self.__data[column].median()
                     self.__data[column].fillna(median_val, inplace=True)
-                elif strategy == 'constant' and value is not None:
-                    self.__data[column].fillna(value, inplace=True)
+                elif strategy == 'constant':
+                    if value is not None:
+                        self.__data[column].fillna(value, inplace=True)
+                    else:
+                        raise ValueError("Value must be provided for 'constant' strategy.")
 
-
-    def check_categorial(self, LessThen: int=None):
-        """выявление категориальных признаков
-        определяем, какие из колонок в можно считать категориальными
-        колонка может быть категориальной, если количество уникальных значений в ней не превышает общее количество строк в DataFrame.
-        колонка также считается категориальной, если количество уникальных значений не превышает threshold"""
-        if LessThen is None:
-            LessThen = self.__data.shape[0]
-
-        categorical_names = []
-
-        for i in self.__data.columns:
-            if self.__data[i].dtype in ('category', 'bool'):
-                categorical_names.append(i)
-            elif self.__data[i].dtype == 'object' and len(self.__data[i].astype(str).unique()) <= LessThen:
-                categorical_names.append(i)
-            elif self.__data[i].dtype == 'float64' and len(self.__data[i].round(10).unique()) <= LessThen:
-                categorical_names.append(i)
-            elif self.__data[i].dtype in ('int64', 'float64', 'timedelta[ns]', 'datatime64') and len(self.__data[i].unique()) <= LessThen:
-                categorical_names.append(i)
-            else:
-                print("Не удаётся определить признак")
-        return categorical_names
-
-
-    def eval_categorical(self, categorical_names, strategy='OneHot'):
-        """обработка категориальных данных"""
-        if strategy == 'Label':
-        """Label: присваивает каждому категориальному признаку уникальный номер"""
-            encoder = LabelEncoder()
-            for column in categorical_names:
-                self.__data[column] = encoder.fit_transform(self.__data[column])
-        
-        elif strategy == 'OneHot':
-            """OneHot: представление данных в виде бинарных векторов""" 
-            encoder = OneHotEncoder(sparse_output=False)
-            for column in categorical_names:
-                one_hot_encoded = encoder.fit_transform(self.__data[column])
-                one_hot_data = pd.DataFrame(one_hot_encoded, columns=encoder.get_feature_names_out([column]))
-                self.__data = pd.concat([self.__data, one_hot_data], axis=1)
-                self.__data.drop(columns=[column], inplace=True)
-        '''преобразовываем категориальные переменные в числовые значения'''
-
-    def preparing(self, LessThen: int=None, strategy='OneHot'):
-        """преобразование для анализа"""
+    def identify_categorical(self, threshold: int = 10) -> list:
+        """Identifies categorical features based on unique value count."""
+        if threshold is None:
+            threshold = self.__data.shape[0]
+        categorical_cols = []
         for column in self.__data.columns:
-            self.remove_outliers(column)
-        self.filled(strategy='mode')
-        categorical = self.check_categorial(LessThen = LessThen)
-        self.eval_categorical(categorical, strategy='OneHot')
+            unique_count = self.__data[column].nunique()
+            if unique_count <= threshold:
+                categorical_cols.append(column)
+        return categorical_cols
+
+    def encode_categorical(self, categorical_cols: list, strategy: str = 'OneHot'):
+        """Encodes categorical features."""
+        if strategy == 'Label':
+            encoder = LabelEncoder()
+            for col in categorical_cols:
+                self.__data[col] = encoder.fit_transform(self.__data[col])
+        elif strategy == 'OneHot':
+            encoder = OneHotEncoder(sparse_output=False, drop='first')
+            for col in categorical_cols:
+                one_hot = encoder.fit_transform(self.__data[[col]])
+                one_hot_df = pd.DataFrame(one_hot, columns=encoder.get_feature_names_out([col]))
+                self.__data = pd.concat([self.__data, one_hot_df], axis=1)
+                self.__data.drop(columns=[col], inplace=True)
+        else:
+            raise ValueError("Unsupported encoding strategy. Choose 'Label' or 'OneHot'.")
+
+    def prepare_data(self, target_column: str, threshold: int = 10, fill_strategy: str = 'mean', encode_strategy: str = 'OneHot'):
+        """Prepares data for analysis, excluding the target column from encoding."""
+        self.fill_missing(strategy=fill_strategy)
+        categorical_cols = self.identify_categorical(threshold=threshold)
+        # Exclude the target column from categorical encoding
+        categorical_cols = [col for col in categorical_cols if col != target_column]
+        self.encode_categorical(categorical_cols, strategy=encode_strategy)
+        self.split_data(target_column)
+
+    def split_data(self, target_column: str):
+        """Splits data into features (X) and target variable (y)."""
+        if target_column not in self.__data.columns:
+            raise ValueError(f"Target column '{target_column}' not found in data.")
+        self.X = self.__data.drop(columns=[target_column])
+        self.y = self.__data[target_column]
 
     def display_stat(self):
-        """вывод статистики"""
+        """Displays main statistical information."""
         print(self.__data.head(5))
         print(self.__data.info())
-
         for col in self.__data.select_dtypes(include=['int64', 'float64']).columns:
-            print(f"Статистика для колонки '{col}':")
-            print(f"Кол-во ненулевых значений: {self.__data[col].count()}")
-            print(f"Ср. знач.: {self.__data[col].mean()}")
-            print(f"Макс.знач.: {self.__data[col].max()}")
-            print(f"Мин. знач.: {self.__data[col].min()}\n")
-            self.__data[col].plot(kind='hist', figsize=(10, 5), grid=True, title=f'histogram {col}')
+            print(f"Statistics for column '{col}':")
+            print(f"Non-null count: {self.__data[col].count()}")
+            print(f"Mean: {self.__data[col].mean()}")
+            print(f"Max: {self.__data[col].max()}")
+            print(f"Min: {self.__data[col].min()}\n")
+            self.__data[col].plot(kind='hist', figsize=(10, 5), grid=True, title=f'Histogram of {col}')
             plt.show()
 
-    def transform(self, to_tensor='numpy'):
-        """Преобразовываем данные в тензоры для выбранной библиотеки"""
+    def transform(self, to_tensor: str = 'numpy'):
+        """Converts data into tensors for selected libraries."""
         if to_tensor == 'numpy':
             return self.X.to_numpy(), self.y.to_numpy()
-            print('Успешно переобразован в numpy!')
         elif to_tensor == 'pytorch':
+            '''self.X и self.y, представленные в виде значений,
+            преобразуются в тензоры с типом данных float32.'''
+            import torch
             return torch.tensor(self.X.values, dtype=torch.float32), torch.tensor(self.y.values, dtype=torch.float32)
-            print('Успешно переобразован в pytorch!')
         elif to_tensor == 'tensorflow':
+            import tensorflow as tf
             return tf.convert_to_tensor(self.X.values, dtype=tf.float32), tf.convert_to_tensor(self.y.values, dtype=tf.float32)
-            print('Успешно переобразован в tensorflow!')
         else:
-            raise ValueError("Поддерживаются только 'numpy', 'pytorch' и 'tensorflow'.")
+            raise ValueError("Only 'numpy', 'pytorch', and 'tensorflow' are supported.")
+
+    def cross_validate(self, model, cv: int = 5, scoring: str = 'r2'):
+        """Performs cross-validation for the model."""
+        if self.X is None or self.y is None:
+            raise ValueError("Data not split into features and target. Call split_data().")
+        scores = cross_val_score(model, self.X, self.y, cv=cv, scoring=scoring)
+        print(f"Cross-validation scores: {scores}")
+        print(f"Mean score: {np.mean(scores)}")
+        return scores
 
 
+# Example usage
 data1 = Dataset('/content/gym_members_exercise_tracking.csv')
-data1.display()
-data1.get_data()
+data1.prepare_data(target_column='Age', fill_strategy='mode', encode_strategy='OneHot')
+data1.display_stat()
+
+# Transform data into tensors
+X_np, y_np = data1.transform(to_tensor='numpy')
+
+# Cross-validation
+from sklearn.linear_model import LinearRegression
+model = LinearRegression()
+data1.cross_validate(model, cv=5, scoring='r2')
